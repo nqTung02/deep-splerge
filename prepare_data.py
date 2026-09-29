@@ -10,7 +10,7 @@ from xml.etree import ElementTree
 
 import cv2
 import numpy as np
-from libs.fintabnet_prepare import prepare_fintabnet
+from libs.fintabnet_prepare import prepare_fintabnet, prepare_fintabnet_c
 
 
 def apply_ocr(path, image):
@@ -285,9 +285,10 @@ if __name__ == "__main__":
     _parser = argparse.ArgumentParser()
     _parser.add_argument(
         "--dataset-format",
-        choices=("legacy", "fintabnet"),
+        choices=("legacy", "fintabnet", "fintabnet-c"),
         default="legacy",
-        help="Input annotation format. 'legacy' preserves the original XML/OCR workflow.",
+        help=("Input annotation format. 'fintabnet-c' reads the canonical "
+              "FinTabNet.c-Structure XML/images/words tree."),
     )
     _parser.add_argument(
         "-img",
@@ -295,7 +296,7 @@ if __name__ == "__main__":
         type=str,
         help="Legacy document images or FinTabNet table-crop images",
         default="/home/umar_visionx/Documents/Asad/data/test/testv2/images_doc",
-        required=True,
+        required=False,
     )
 
     _parser.add_argument(
@@ -330,6 +331,16 @@ if __name__ == "__main__":
         help="FinTabNet cell annotation JSONL (required for --dataset-format fintabnet)",
     )
     _parser.add_argument(
+        "--fintabnet-c-root",
+        type=str,
+        help="Extracted FinTabNet.c-Structure directory (contains images/train/val/test/words)",
+    )
+    _parser.add_argument(
+        "--split",
+        choices=("train", "val", "test"),
+        help="FinTabNet.c split to prepare",
+    )
+    _parser.add_argument(
         "--max-tables",
         type=int,
         default=None,
@@ -339,6 +350,11 @@ if __name__ == "__main__":
         "--allow-missing-images",
         action="store_true",
         help="Allow a deliberate FinTabNet subset when some annotations lack crops",
+    )
+    _parser.add_argument(
+        "--allow-missing-files",
+        action="store_true",
+        help="Allow a deliberate FinTabNet.c subset with missing images/word files",
     )
     _parser.add_argument(
         "--max-separator-width",
@@ -352,6 +368,8 @@ if __name__ == "__main__":
     if args.dataset_format == "fintabnet":
         if not args.cell_jsonl:
             _parser.error("--cell-jsonl is required for --dataset-format fintabnet")
+        if not args.image_dir:
+            _parser.error("--image_dir is required for --dataset-format fintabnet")
         if args.max_separator_width < 1:
             _parser.error("--max-separator-width must be at least 1")
         summary = prepare_fintabnet(
@@ -363,9 +381,28 @@ if __name__ == "__main__":
             max_separator_width=args.max_separator_width,
         )
         print("FinTabNet preparation summary:", summary)
+    elif args.dataset_format == "fintabnet-c":
+        if not args.fintabnet_c_root or not args.split:
+            _parser.error(
+                "--fintabnet-c-root and --split are required for "
+                "--dataset-format fintabnet-c"
+            )
+        if args.max_separator_width < 1:
+            _parser.error("--max-separator-width must be at least 1")
+        summary = prepare_fintabnet_c(
+            args.fintabnet_c_root,
+            args.split,
+            args.out_dir,
+            max_tables=args.max_tables,
+            allow_missing_files=args.allow_missing_files,
+            max_separator_width=args.max_separator_width,
+        )
+        print("FinTabNet.c preparation summary:", summary)
     else:
-        if not args.xml_dir or not args.ocr_dir:
-            _parser.error("--xml_dir and --ocr_dir are required for legacy input")
+        if not args.image_dir or not args.xml_dir or not args.ocr_dir:
+            _parser.error(
+                "--image_dir, --xml_dir and --ocr_dir are required for legacy input"
+            )
         os.makedirs(args.out_dir, exist_ok=True)
         os.makedirs(os.path.join(args.out_dir, "table_images"), exist_ok=True)
         os.makedirs(os.path.join(args.out_dir, "table_split_labels"), exist_ok=True)

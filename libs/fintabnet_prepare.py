@@ -1,4 +1,4 @@
-"""Prepare Deep Splerge split-model data from FinTabNet cell annotations."""
+"""Prepare Deep Splerge split-model data from FinTabNet and FinTabNet.c."""
 
 import html
 import json
@@ -7,6 +7,7 @@ import re
 from collections import defaultdict
 from html.parser import HTMLParser
 from pathlib import Path
+from xml.etree import ElementTree
 
 import cv2
 import numpy as np
@@ -15,6 +16,7 @@ import numpy as np
 IMAGE_PATTERN = re.compile(
     r"^(?P<ticker>[A-Za-z0-9]+)_(?P<year>\d{4})_page_(?P<page>\d+)_table_(?P<table>\d+)$"
 )
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 
 
 class FinTabNetHTMLParser(HTMLParser):
@@ -71,7 +73,7 @@ def build_image_map(image_dir):
     """Map FinTabNet source page/table keys to local table-crop paths."""
     image_dir = Path(image_dir)
     candidates = sorted(
-        (path for path in image_dir.rglob("*") if path.suffix.lower() in {".png", ".jpg", ".jpeg"}),
+        (path for path in image_dir.rglob("*") if path.suffix.lower() in IMAGE_SUFFIXES),
         key=lambda path: (path.stem, path.suffix.lower() != ".png", str(path)),
     )
     image_map = {}
@@ -264,6 +266,244 @@ def convert_record(record, image, max_separator_width=32):
 
 def _write_vector(path, values):
     path.write_text("".join(f"{int(value)}\n" for value in values), encoding="utf-8")
+
+
+def _pascal_bbox(obj, width, height):
+    box = obj.find("bndbox")
+    if box is None:
+        raise ValueError("PASCAL VOC object has no bndbox")
+    values = []
+    for tag in ("xmin", "ymin", "xmax", "ymax"):
+        value = box.findtext(tag)
+        if value is None:
+            raise ValueError(f"PASCAL VOC bndbox has no {tag}")
+        values.append(float(value))
+    values[0] = max(0.0, min(float(width), values[0]))
+    values[2] = max(0.0, min(float(width), values[2]))
+    values[1] = max(0.0, min(float(height), values[1]))
+    values[3] = max(0.0, min(float(height), values[3]))
+    if values[2] <= values[0] or values[3] <= values[1]:
+        raise ValueError(f"Invalid PASCAL VOC bounding box: {values}")
+    return values
+
+
+def parse_fintabnet_c_xml(xml_path):
+    """Read the PASCAL VOC structure objects emitted by Table Transformer."""
+    root = ElementTree.parse(xml_path).getroot()
+    width = int(round(float(root.findtext("size/width", "0"))))
+    height = int(round(float(root.findtext("size/height", "0"))))
+    if width < 1 or height < 1:
+        raise ValueError(f"Invalid image size in {xml_path}: {width}x{height}")
+    objects = defaultdict(list)
+    for obj in root.findall("object"):
+        name = (obj.findtext("name") or "").strip().lower()
+        objects[name].append(_pascal_bbox(obj, width, height))
+    rows = sorted(objects["table row"], key=lambda box: (box[1], box[3]))
+    columns = sorted(objects["table column"], key=lambda box: (box[0], box[2]))
+    if not rows or not columns:
+        raise ValueError(f"No table row/column objects in {xml_path}")
+    return {
+        "filename": (root.findtext("filename") or f"{Path(xml_path).stem}.jpg").strip(),
+        "width": width,
+        "height": height,
+        "rows": rows,
+        "columns": columns,
+        "spanning_cells": objects["table spanning cell"],
+        "projected_row_headers": objects["table projected row header"],
+    }
+
+
+def _object_boundaries(boxes, axis, extent):
+    low_index, high_index = (0, 2) if axis == "x" else (1, 3)
+    boundaries = [0.0]
+    for before, after in zip(boxes[:-1], boxes[1:]):
+        boundaries.append((before[high_index] + after[low_index]) / 2.0)
+    boundaries.append(float(extent))
+    rounded = np.rint(np.asarray(boundaries, dtype=np.float64)).astype(np.int32)
+    rounded = np.clip(rounded, 0, extent)
+    rounded = np.maximum.accumulate(rounded)
+    rounded[-1] = extent
+    return rounded
+
+
+def load_fintabnet_c_words(words_path, width, height):
+    """Convert FinTabNet.c word JSON into Deep Splerge's OCR tuple format."""
+    with Path(words_path).open("r", encoding="utf-8") as handle:
+        words = json.load(handle)
+    if isinstance(words, dict):
+        words = words.get("words", words.get("tokens", []))
+    if not isinstance(words, list):
+        raise ValueError(f"Expected a word list in {words_path}")
+    ocr = []
+    for word in words:
+        if not isinstance(word, dict):
+            continue
+        text = str(word.get("text", "")).strip()
+        bbox = word.get("bbox")
+        if not text or not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        x0 = max(0, min(width, int(round(float(bbox[0])))))
+        y0 = max(0, min(height, int(round(float(bbox[1])))))
+        x1 = max(0, min(width, int(round(float(bbox[2])))))
+        y1 = max(0, min(height, int(round(float(bbox[3])))))
+        if x1 > x0 and y1 > y0:
+            ocr.append([len(text), text, x0, y0, x1, y1])
+    return ocr
+
+
+def convert_fintabnet_c(annotation, words, image, max_separator_width=32):
+    """Convert one canonical FinTabNet.c XML/word pair into model artifacts."""
+    height, width = image.shape[:2]
+    if (annotation["width"], annotation["height"]) != (width, height):
+        raise ValueError(
+            "XML/image size mismatch: "
+            f"XML={annotation['width']}x{annotation['height']}, image={width}x{height}"
+        )
+    x_boundaries = _object_boundaries(annotation["columns"], "x", width)
+    y_boundaries = _object_boundaries(annotation["rows"], "y", height)
+    text_mask = np.zeros((height, width), dtype=np.uint8)
+    for item in words:
+        cv2.rectangle(text_mask, (item[2], item[3]), (item[4], item[5]), 255, -1)
+
+    # This follows Deep Splerge's original preparation: text in a spanning cell
+    # must not erase a separator that remains logically present in the grid.
+    separator_occupancy = text_mask.copy()
+    for bbox in annotation["spanning_cells"] + annotation["projected_row_headers"]:
+        x0, y0, x1, y1 = [int(round(value)) for value in bbox]
+        cv2.rectangle(separator_occupancy, (x0, y0), (x1, y1), 0, -1)
+
+    return {
+        "row_labels": _separator_vector(
+            np.any(separator_occupancy != 0, axis=1), y_boundaries,
+            max_separator_width),
+        "col_labels": _separator_vector(
+            np.any(separator_occupancy != 0, axis=0), x_boundaries,
+            max_separator_width),
+        "ocr": words,
+        "rows": len(annotation["rows"]),
+        "columns": len(annotation["columns"]),
+        "row_boundaries": y_boundaries,
+        "column_boundaries": x_boundaries,
+    }
+
+
+def _file_map(directory, suffixes):
+    return {
+        path.stem: path.resolve()
+        for path in Path(directory).iterdir()
+        if path.is_file() and path.suffix.lower() in suffixes
+    }
+
+
+def prepare_fintabnet_c(
+    root_dir,
+    split,
+    out_dir,
+    max_tables=None,
+    allow_missing_files=False,
+    max_separator_width=32,
+):
+    """Prepare one split directly from an extracted FinTabNet.c-Structure tree."""
+    root_dir = Path(root_dir)
+    split_dir = root_dir / split
+    images_dir = root_dir / "images"
+    words_dir = root_dir / "words"
+    for path, description in (
+        (split_dir, f"'{split}' annotation directory"),
+        (images_dir, "image directory"),
+        (words_dir, "word directory"),
+    ):
+        if not path.is_dir():
+            raise FileNotFoundError(f"Missing FinTabNet.c {description}: {path}")
+
+    xml_paths = sorted(split_dir.glob("*.xml"))
+    if max_tables is not None:
+        xml_paths = xml_paths[:max_tables]
+    if not xml_paths:
+        raise RuntimeError(f"No XML annotations found in {split_dir}")
+    image_map = _file_map(images_dir, IMAGE_SUFFIXES)
+    word_map = {
+        path.name[:-len("_words.json")]: path.resolve()
+        for path in words_dir.glob("*_words.json")
+    }
+    selected = []
+    missing_images = []
+    missing_words = []
+    for xml_path in xml_paths:
+        stem = xml_path.stem
+        image_path = image_map.get(stem)
+        words_path = word_map.get(stem)
+        if image_path is None:
+            missing_images.append(stem)
+        if words_path is None:
+            missing_words.append(stem)
+        if image_path is not None and words_path is not None:
+            selected.append((xml_path, image_path, words_path))
+    if (missing_images or missing_words) and not allow_missing_files:
+        examples = ", ".join((missing_images + missing_words)[:5])
+        raise RuntimeError(
+            "Incomplete FinTabNet.c coverage: "
+            f"{len(missing_images)} images and {len(missing_words)} word files missing "
+            f"for {len(xml_paths)} XML files. Examples: {examples}. "
+            "Fix the extracted dataset or pass --allow-missing-files for an intentional subset."
+        )
+    if not selected:
+        raise RuntimeError("No complete FinTabNet.c XML/image/word samples found")
+
+    out_dir = Path(out_dir)
+    output_images = out_dir / "table_images"
+    output_labels = out_dir / "table_split_labels"
+    output_ocr = out_dir / "table_ocr"
+    for path in (output_images, output_labels, output_ocr):
+        path.mkdir(parents=True, exist_ok=True)
+
+    summary = {
+        "annotations": len(xml_paths),
+        "matched_files": len(selected),
+        "missing_images": len(missing_images),
+        "missing_words": len(missing_words),
+        "coverage": len(selected) / len(xml_paths),
+        "written_tables": 0,
+        "rows": 0,
+        "columns": 0,
+    }
+    for xml_path, image_path, words_path in selected:
+        image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            raise RuntimeError(f"Unable to read table image: {image_path}")
+        annotation = parse_fintabnet_c_xml(xml_path)
+        words = load_fintabnet_c_words(words_path, image.shape[1], image.shape[0])
+        converted = convert_fintabnet_c(
+            annotation, words, image, max_separator_width)
+        table_name = xml_path.stem
+        if not cv2.imwrite(str(output_images / f"{table_name}.png"), image):
+            raise RuntimeError(f"Unable to write prepared image: {table_name}")
+        _write_vector(
+            output_labels / f"{table_name}_row.txt", converted["row_labels"])
+        _write_vector(
+            output_labels / f"{table_name}_col.txt", converted["col_labels"])
+        with (output_ocr / f"{table_name}.pkl").open("wb") as handle:
+            pickle.dump(converted["ocr"], handle)
+        summary["written_tables"] += 1
+        summary["rows"] += converted["rows"]
+        summary["columns"] += converted["columns"]
+        written = summary["written_tables"]
+        if written == 1 or written % 100 == 0 or written == len(selected):
+            print(
+                f"[{written}/{len(selected)}] "
+                f"{table_name}: {converted['rows']}x{converted['columns']}"
+            )
+
+    summary.update({
+        "source_format": "FinTabNet.c-Structure",
+        "source_root": str(root_dir.resolve()),
+        "split": split,
+        "output_dir": str(out_dir.resolve()),
+        "max_separator_width": int(max_separator_width),
+    })
+    (out_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    return summary
 
 
 def prepare_fintabnet(

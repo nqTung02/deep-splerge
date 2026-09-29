@@ -43,9 +43,50 @@ optional arguments:
 ```
 Sample Command: `python prepare_data.py -img data/images/ -xml data/xmls/ -ocr data/ocr/ -o data/prepared/` 
 
-#### FinTabNet input
+#### Recommended: extracted FinTabNet.c input
 
-`prepare_data.py` also accepts FinTabNet cell-annotation JSONL files and
+Use this mode when the dataset has the standard Table Transformer layout:
+
+```text
+FinTabNet.c-Structure/
+  images/
+  train/
+  val/
+  test/
+  words/
+```
+
+No JSONL conversion and no Tesseract run are needed. The preparer reads the
+canonical PASCAL VOC row/column XML and the matching `*_words.json` files
+directly:
+
+```bash
+python prepare_data.py \
+  --dataset-format fintabnet-c \
+  --fintabnet-c-root ~/fintabnet/FinTabNet.c-Structure \
+  --split train \
+  --out_dir data/fintabnet_train
+
+python prepare_data.py \
+  --dataset-format fintabnet-c \
+  --fintabnet-c-root ~/fintabnet/FinTabNet.c-Structure \
+  --split val \
+  --out_dir data/fintabnet_val
+```
+
+Add `--max-tables 64` for a quick smoke run. Preparation checks that every XML
+has both an image and a word file before writing output. Use
+`--allow-missing-files` only when an incomplete subset is intentional.
+
+FinTabNet.c is not a byte-for-byte repackaging of the original FinTabNet JSONL.
+It is the cleaned and canonicalized derivative produced by Microsoft's Table
+Transformer pipeline; rejected and corrected tables make the two sources differ.
+For an already extracted FinTabNet.c dataset, this direct mode is the correct
+source of truth.
+
+#### Alternative: original FinTabNet 1.0.0 JSONL input
+
+`prepare_data.py` also accepts original FinTabNet cell-annotation JSONL files and
 pre-cropped table images directly. It parses the HTML row/column spans, converts
 the PDF-coordinate cell boxes into crop coordinates, writes Deep Splerge row
 and column separator labels, and stores FinTabNet text boxes in the existing
@@ -77,8 +118,9 @@ data/fintabnet_train/
 ```
 
 FinTabNet's annotation text boxes act as perfect OCR for data preparation; no
-Tesseract installation is required for this path. Train and validation JSONLs
-should be split by source document before running this command.
+Tesseract installation is required for this path. This mode is retained for
+users who have FinTabNet 1.0.0 but have not extracted FinTabNet.c. Large dataset
+JSONLs are intentionally not stored in this Git repository.
 
 ### 2. Train Split Model
 
