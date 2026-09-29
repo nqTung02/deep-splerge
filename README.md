@@ -12,6 +12,12 @@ A model has been provided with this repository placed at ```model_out/split_mode
 
 ## Usages
 
+For FinTabNet preparation only, install the lightweight dependencies with:
+
+```bash
+python -m pip install -r requirements-prepare.txt
+```
+
 ### 1. Prepare Data
 
 ```prepare_data.py``` takes as input the original labelled dataset (images, XML files and OCR files) and prepares the data for usage by the split model. Specifically it creates crops of tables out of the original dataset and generates corresponding split model labels and OCR.
@@ -36,6 +42,43 @@ optional arguments:
                         Path of output directory for generated data
 ```
 Sample Command: `python prepare_data.py -img data/images/ -xml data/xmls/ -ocr data/ocr/ -o data/prepared/` 
+
+#### FinTabNet input
+
+`prepare_data.py` also accepts FinTabNet cell-annotation JSONL files and
+pre-cropped table images directly. It parses the HTML row/column spans, converts
+the PDF-coordinate cell boxes into crop coordinates, writes Deep Splerge row
+and column separator labels, and stores FinTabNet text boxes in the existing
+OCR pickle format.
+
+```powershell
+python prepare_data.py `
+  --dataset-format fintabnet `
+  --cell-jsonl D:\fintabnet\FinTabNet_1.0.0_cell_train.jsonl `
+  --image_dir D:\fintabnet\images `
+  --out_dir data\fintabnet_train
+```
+
+Expected crop names follow FinTabNet's common convention, for example
+`AAPL_2003_page_10_table_0.png` for the first table annotated on
+`AAPL/2003/page_10.pdf`. JPG and JPEG crops are also supported. The preparer
+requires complete image coverage by default so an incomplete training set is
+not produced silently. Use `--allow-missing-images` only for an intentional
+subset, and use `--max-tables 64` for a quick smoke run.
+
+The generated layout is unchanged:
+
+```text
+data/fintabnet_train/
+  table_images/
+  table_split_labels/
+  table_ocr/
+  summary.json
+```
+
+FinTabNet's annotation text boxes act as perfect OCR for data preparation; no
+Tesseract installation is required for this path. Train and validation JSONLs
+should be split by source document before running this command.
 
 ### 2. Train Split Model
 

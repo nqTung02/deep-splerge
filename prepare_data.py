@@ -10,9 +10,7 @@ from xml.etree import ElementTree
 
 import cv2
 import numpy as np
-import pytesseract
-from PIL import Image
-from libs.eval_data_parser import GenerateTFRecord
+from libs.fintabnet_prepare import prepare_fintabnet
 
 
 def apply_ocr(path, image):
@@ -23,6 +21,8 @@ def apply_ocr(path, image):
     RETURNS:
         bboxes: entire ocr data of the Image
     """
+
+    import pytesseract
 
     if os.path.exists(path):
         with open(path, "rb") as f:
@@ -84,6 +84,9 @@ def process_files(image_dir, xml_dir, ocr_dir, out_dir):
     RETURNS:
         returns no data, saves the processed data to the provided output directory.
     """
+    from PIL import Image
+    from libs.eval_data_parser import GenerateTFRecord
+
     files = [
         file.split("/")[-1].rsplit(".", 1)[0]
         for file in glob.glob(os.path.join(xml_dir, "*.xml"))
@@ -281,10 +284,16 @@ def process_files(image_dir, xml_dir, ocr_dir, out_dir):
 if __name__ == "__main__":
     _parser = argparse.ArgumentParser()
     _parser.add_argument(
+        "--dataset-format",
+        choices=("legacy", "fintabnet"),
+        default="legacy",
+        help="Input annotation format. 'legacy' preserves the original XML/OCR workflow.",
+    )
+    _parser.add_argument(
         "-img",
         "--image_dir",
         type=str,
-        help="Directory containing document-level images",
+        help="Legacy document images or FinTabNet table-crop images",
         default="/home/umar_visionx/Documents/Asad/data/test/testv2/images_doc",
         required=True,
     )
@@ -295,7 +304,7 @@ if __name__ == "__main__":
         type=str,
         help="Directory containing document-level xmls",
         default="/home/umar_visionx/Documents/Asad/data/test/testv2/gt_doc",
-        required=True,
+        required=False,
     )
 
     _parser.add_argument(
@@ -304,7 +313,7 @@ if __name__ == "__main__":
         type=str,
         help="Directory containing document-level ocr files. (If an OCR file is not found, it will be generated and saved in this directory for future use)",
         default="/home/umar_visionx/Documents/Asad/data/test/testv2/ocr_doc",
-        required=True,
+        required=False,
     )
 
     _parser.add_argument(
@@ -315,12 +324,50 @@ if __name__ == "__main__":
         default="/home/umar_visionx/Documents/Asad/data/test/testv2/ocr_tab",
         required=True,
     )
+    _parser.add_argument(
+        "--cell-jsonl",
+        type=str,
+        help="FinTabNet cell annotation JSONL (required for --dataset-format fintabnet)",
+    )
+    _parser.add_argument(
+        "--max-tables",
+        type=int,
+        default=None,
+        help="Optional annotation limit for a smoke preparation run",
+    )
+    _parser.add_argument(
+        "--allow-missing-images",
+        action="store_true",
+        help="Allow a deliberate FinTabNet subset when some annotations lack crops",
+    )
+    _parser.add_argument(
+        "--max-separator-width",
+        type=int,
+        default=32,
+        help="Maximum positive label width around a FinTabNet separator",
+    )
 
     args = _parser.parse_args()
 
-    os.makedirs(args.out_dir, exist_ok=True)
-    os.makedirs(os.path.join(args.out_dir, "table_images"), exist_ok=True)
-    os.makedirs(os.path.join(args.out_dir, "table_split_labels"), exist_ok=True)
-    os.makedirs(os.path.join(args.out_dir, "table_ocr"), exist_ok=True)
-
-    process_files(args.image_dir, args.xml_dir, args.ocr_dir, args.out_dir)
+    if args.dataset_format == "fintabnet":
+        if not args.cell_jsonl:
+            _parser.error("--cell-jsonl is required for --dataset-format fintabnet")
+        if args.max_separator_width < 1:
+            _parser.error("--max-separator-width must be at least 1")
+        summary = prepare_fintabnet(
+            args.cell_jsonl,
+            args.image_dir,
+            args.out_dir,
+            max_tables=args.max_tables,
+            allow_missing_images=args.allow_missing_images,
+            max_separator_width=args.max_separator_width,
+        )
+        print("FinTabNet preparation summary:", summary)
+    else:
+        if not args.xml_dir or not args.ocr_dir:
+            _parser.error("--xml_dir and --ocr_dir are required for legacy input")
+        os.makedirs(args.out_dir, exist_ok=True)
+        os.makedirs(os.path.join(args.out_dir, "table_images"), exist_ok=True)
+        os.makedirs(os.path.join(args.out_dir, "table_split_labels"), exist_ok=True)
+        os.makedirs(os.path.join(args.out_dir, "table_ocr"), exist_ok=True)
+        process_files(args.image_dir, args.xml_dir, args.ocr_dir, args.out_dir)

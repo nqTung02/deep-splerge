@@ -31,13 +31,15 @@ class SplitTableDataset(torch.utils.data.Dataset):
         cprint(self.train_images_path, "yellow")
         cprint(self.train_labels_path, "yellow")
 
-        self.img_paths = list(
-            sorted(os.listdir(os.path.join(self.root, self.train_images_path)))
-        )
+        self.img_paths = [
+            name
+            for name in sorted(os.listdir(os.path.join(self.root, self.train_images_path)))
+            if os.path.splitext(name)[1].lower() in {".png", ".jpg", ".jpeg"}
+        ]
 
     def __getitem__(self, idx):
         img_path = os.path.join(self.root, self.train_images_path, self.img_paths[idx])
-        img_name = img_path.split("/")[-1][:-4]
+        img_name = os.path.splitext(os.path.basename(img_path))[0]
 
         row_label_path = os.path.join(
             self.root, self.train_labels_path, img_name + "_row.txt"
